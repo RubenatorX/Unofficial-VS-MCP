@@ -110,6 +110,14 @@ namespace VsMcp.Extension.McpServer
                 var request = context.Request;
                 var response = context.Response;
 
+                // http.sys accepts any client that sends "Host: localhost", so also reject
+                // connections that do not originate from this machine.
+                if (!request.IsLocal)
+                {
+                    await WriteResponseAsync(response, 403, "{\"error\": \"Remote connections not allowed\"}");
+                    return;
+                }
+
                 // Browsers always send Origin on cross-origin requests. Reject any origin that
                 // is not explicitly allowed so web pages cannot drive Visual Studio.
                 var origin = request.Headers["Origin"];
@@ -140,7 +148,6 @@ namespace VsMcp.Extension.McpServer
 
                 if (_security.RequireAuthToken && !IsAuthorized(request))
                 {
-                    response.Headers.Add("WWW-Authenticate", "Bearer");
                     await WriteResponseAsync(response, 401, "{\"error\": \"Unauthorized\"}", corsOrigin);
                     return;
                 }

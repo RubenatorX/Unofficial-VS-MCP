@@ -408,7 +408,7 @@ You can also specify individual category names (e.g. `--tools General,Build,Debu
 
 ## Security
 
-The extension's HTTP server listens on `localhost` only, and every request must include a per-session bearer token:
+The extension's HTTP server only accepts connections from the local machine, and every request must include a per-session bearer token:
 
 - When Visual Studio starts, the extension generates a random 256-bit token and writes it, together with the port, to its port file under `%LOCALAPPDATA%\VsMcp\`. By default only your Windows account (and administrators) can read that folder.
 - StdioProxy reads the token from the port file and sends `Authorization: Bearer <token>` with every request, so **no client configuration changes are needed**.

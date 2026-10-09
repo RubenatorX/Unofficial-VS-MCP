@@ -406,6 +406,29 @@ You can also specify individual category names (e.g. `--tools General,Build,Debu
 - If VS is restarted, StdioProxy automatically reconnects on the next `tools/call` request.
 - Stale port files from crashed or closed VS instances are cleaned up automatically during discovery.
 
+## Security
+
+The extension's HTTP server listens on `localhost` only, and every request must include a per-session bearer token:
+
+- When Visual Studio starts, the extension generates a random 256-bit token and writes it, together with the port, to its port file under `%LOCALAPPDATA%\VsMcp\`. By default only your Windows account (and administrators) can read that folder.
+- StdioProxy reads the token from the port file and sends `Authorization: Bearer <token>` with every request, so **no client configuration changes are needed**.
+- Requests without a valid token get `401 Unauthorized`.
+- Requests from a web browser (anything with an `Origin` header) are rejected with `403 Forbidden` unless that origin is explicitly allowed. This stops a web page you visit from driving Visual Studio.
+
+Settings live in `%LOCALAPPDATA%\VsMcp\server-settings.json`, which is created with secure defaults on first launch. Restart Visual Studio after changing it.
+
+```json
+{
+  "requireAuthToken": true,
+  "allowedOrigins": []
+}
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `requireAuthToken` | `true` | Require the bearer token on every request. Set to `false` only if you understand that any local process (and, with `allowedOrigins`, any allowed web page) can then control Visual Studio. |
+| `allowedOrigins` | `[]` | Browser origins allowed to call the server, e.g. `["http://localhost:5173"]` for a local web UI. Allowed origins receive CORS headers. `"*"` allows every origin and is not recommended. Browser clients still need the token unless `requireAuthToken` is `false`. |
+
 ## Showcase: hands-off AI-driven dogfood
 
 With `focus_guard_set enabled=true`, an AI agent can drive a full

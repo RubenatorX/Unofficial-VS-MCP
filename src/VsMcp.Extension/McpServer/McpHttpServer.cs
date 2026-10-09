@@ -13,6 +13,8 @@ namespace VsMcp.Extension.McpServer
 {
     /// <summary>
     /// HTTP server that listens on a dynamic localhost port and handles MCP JSON-RPC requests.
+    /// Requests must carry the per-session bearer token written to the port file, and browser
+    /// requests are only accepted from origins listed in server-settings.json.
     /// </summary>
     public class McpHttpServer : IDisposable
     {
@@ -21,6 +23,8 @@ namespace VsMcp.Extension.McpServer
         private CancellationTokenSource _cts;
         private int _port;
         private bool _disposed;
+        private ServerSecuritySettings _security;
+        private string _authToken;
 
         public int Port => _port;
 
@@ -32,6 +36,8 @@ namespace VsMcp.Extension.McpServer
         public void Start()
         {
             _cts = new CancellationTokenSource();
+            _security = ServerSecuritySettings.Load();
+            _authToken = ServerSecuritySettings.GenerateToken();
 
             // Find an available port
             var tempListener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
@@ -45,7 +51,7 @@ namespace VsMcp.Extension.McpServer
 
             // Write port file for discovery
             var pid = Process.GetCurrentProcess().Id;
-            PortDiscovery.WritePort(pid, _port);
+            PortDiscovery.WritePort(pid, _port, token: _authToken);
 
             // Start listening loop (fire-and-forget is intentional)
             _ = Task.Run(() => ListenLoopAsync(_cts.Token));
@@ -97,10 +103,47 @@ namespace VsMcp.Extension.McpServer
 
         private async Task HandleRequestAsync(HttpListenerContext context)
         {
+            // Origin allowed to read the response (CORS); null means no CORS header is sent.
+            string corsOrigin = null;
             try
             {
                 var request = context.Request;
                 var response = context.Response;
+
+                // Browsers always send Origin on cross-origin requests. Reject any origin that
+                // is not explicitly allowed so web pages cannot drive Visual Studio.
+                var origin = request.Headers["Origin"];
+                if (!string.IsNullOrEmpty(origin))
+                {
+                    if (!_security.IsOriginAllowed(origin))
+                    {
+                        await WriteResponseAsync(response, 403, "{\"error\": \"Origin not allowed\"}");
+                        return;
+                    }
+                    corsOrigin = origin;
+                }
+
+                // CORS preflight for allowed origins
+                if (request.HttpMethod == "OPTIONS")
+                {
+                    if (corsOrigin != null)
+                    {
+                        response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+                        var requestedHeaders = request.Headers["Access-Control-Request-Headers"];
+                        if (!string.IsNullOrEmpty(requestedHeaders))
+                            response.Headers.Add("Access-Control-Allow-Headers", requestedHeaders);
+                        response.Headers.Add("Access-Control-Max-Age", "600");
+                    }
+                    await WriteResponseAsync(response, 204, "", corsOrigin);
+                    return;
+                }
+
+                if (_security.RequireAuthToken && !IsAuthorized(request))
+                {
+                    response.Headers.Add("WWW-Authenticate", "Bearer");
+                    await WriteResponseAsync(response, 401, "{\"error\": \"Unauthorized\"}", corsOrigin);
+                    return;
+                }
 
                 // Health check endpoint
                 if (request.HttpMethod == "GET" && request.Url.AbsolutePath == "/health")
@@ -113,7 +156,7 @@ namespace VsMcp.Extension.McpServer
                         port = _port,
                         solutionState = VsMcpPackage.SolutionState
                     });
-                    await WriteResponseAsync(response, 200, healthJson);
+                    await WriteResponseAsync(response, 200, healthJson, corsOrigin);
                     return;
                 }
 
@@ -134,7 +177,7 @@ namespace VsMcp.Extension.McpServer
                     catch (JsonException ex)
                     {
                         var errorResp = JsonRpcResponse.ErrorResponse(null, McpConstants.ParseError, $"Parse error: {ex.Message}");
-                        await WriteResponseAsync(response, 200, JsonConvert.SerializeObject(errorResp));
+                        await WriteResponseAsync(response, 200, JsonConvert.SerializeObject(errorResp), corsOrigin);
                         return;
                     }
 
@@ -147,7 +190,7 @@ namespace VsMcp.Extension.McpServer
                             rpcRequest.Id,
                             McpConstants.HeaderMismatch,
                             $"Mcp-Method header '{headerMethod}' does not match body method '{rpcRequest.Method}'.");
-                        await WriteResponseAsync(response, 200, JsonConvert.SerializeObject(mismatchResp));
+                        await WriteResponseAsync(response, 200, JsonConvert.SerializeObject(mismatchResp), corsOrigin);
                         return;
                     }
                     var headerName = request.Headers[McpConstants.HeaderMcpName];
@@ -160,7 +203,7 @@ namespace VsMcp.Extension.McpServer
                                 rpcRequest.Id,
                                 McpConstants.HeaderMismatch,
                                 $"Mcp-Name header '{headerName}' does not match tools/call body name '{bodyName}'.");
-                            await WriteResponseAsync(response, 200, JsonConvert.SerializeObject(mismatchResp));
+                            await WriteResponseAsync(response, 200, JsonConvert.SerializeObject(mismatchResp), corsOrigin);
                             return;
                         }
                     }
@@ -175,7 +218,7 @@ namespace VsMcp.Extension.McpServer
                     if (rpcResponse == null)
                     {
                         // Notification - no response body needed
-                        await WriteResponseAsync(response, 204, "");
+                        await WriteResponseAsync(response, 204, "", corsOrigin);
                         return;
                     }
 
@@ -184,30 +227,43 @@ namespace VsMcp.Extension.McpServer
                         NullValueHandling = NullValueHandling.Ignore
                     });
                     McpRequestRouter.Log($"[HTTP] <<< {method} id={rpcRequest.Id} - writing {jsonResponse.Length} bytes");
-                    await WriteResponseAsync(response, 200, jsonResponse);
+                    await WriteResponseAsync(response, 200, jsonResponse, corsOrigin);
                     McpRequestRouter.Log($"[HTTP] <<< {method} id={rpcRequest.Id} - write complete");
                     return;
                 }
 
                 // 404 for everything else
-                await WriteResponseAsync(response, 404, "{\"error\": \"Not found\"}");
+                await WriteResponseAsync(response, 404, "{\"error\": \"Not found\"}", corsOrigin);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[VsMcp] Request handling error: {ex.Message}");
                 try
                 {
-                    await WriteResponseAsync(context.Response, 500, $"{{\"error\": \"{ex.Message}\"}}");
+                    await WriteResponseAsync(context.Response, 500, $"{{\"error\": \"{ex.Message}\"}}", corsOrigin);
                 }
                 catch { /* best effort */ }
             }
         }
 
-        private static async Task WriteResponseAsync(HttpListenerResponse response, int statusCode, string body)
+        private bool IsAuthorized(HttpListenerRequest request)
+        {
+            const string prefix = "Bearer ";
+            var header = request.Headers["Authorization"];
+            if (string.IsNullOrEmpty(header) || !header.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return false;
+            return ServerSecuritySettings.TokensEqual(_authToken, header.Substring(prefix.Length).Trim());
+        }
+
+        private static async Task WriteResponseAsync(HttpListenerResponse response, int statusCode, string body, string corsOrigin = null)
         {
             response.StatusCode = statusCode;
             response.ContentType = "application/json";
-            response.Headers.Add("Access-Control-Allow-Origin", "*");
+            if (corsOrigin != null)
+            {
+                response.Headers.Add("Access-Control-Allow-Origin", corsOrigin);
+                response.Headers.Add("Vary", "Origin");
+            }
 
             if (!string.IsNullOrEmpty(body))
             {

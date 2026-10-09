@@ -278,12 +278,25 @@ namespace VsMcp.StdioProxy
                     content.Headers.TryAddWithoutValidation(McpConstants.HeaderMcpMethod, method);
                 if (!string.IsNullOrEmpty(toolName))
                     content.Headers.TryAddWithoutValidation(McpConstants.HeaderMcpName, toolName);
+                var request = new HttpRequestMessage(HttpMethod.Post, mcpUrl) { Content = content };
+                // The extension writes a per-session token to its port file; send it as a bearer token.
+                var token = PortDiscovery.FindToken(new Uri(_baseUrl).Port);
+                if (!string.IsNullOrEmpty(token))
+                    request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
                 Log($"[HTTP] PostAsync id={id} to {mcpUrl}...");
-                var response = await HttpClient.PostAsync(mcpUrl, content, ct);
+                var response = await HttpClient.SendAsync(request, ct);
                 Log($"[HTTP] PostAsync id={id} status={response.StatusCode}");
 
                 if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
                     return null; // notification - no response
+
+                if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized
+                    || response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    await Console.Error.WriteLineAsync($"[VsMcp.StdioProxy] VS MCP server rejected the request ({(int)response.StatusCode}).");
+                    return id == null ? null : BuildJsonRpcError(id, McpConstants.InternalError,
+                        "Visual Studio rejected the request (auth token mismatch). Restart Visual Studio, and make sure the VS MCP extension and StdioProxy are the same version.");
+                }
 
                 Log($"[HTTP] ReadAsStringAsync id={id}...");
                 var body = await response.Content.ReadAsStringAsync();

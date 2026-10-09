@@ -15,6 +15,9 @@ namespace VsMcp.Shared
 
         [JsonProperty("sln")]
         public string Sln { get; set; } = "";
+
+        [JsonProperty("token", NullValueHandling = NullValueHandling.Ignore)]
+        public string Token { get; set; }
     }
 
     public static class PortDiscovery
@@ -30,14 +33,15 @@ namespace VsMcp.Shared
             return Path.Combine(GetPortFolder(), $"{McpConstants.PortFilePrefix}{pid}{McpConstants.PortFileSuffix}");
         }
 
-        public static void WritePort(int pid, int port, string slnPath = null)
+        public static void WritePort(int pid, int port, string slnPath = null, string token = null)
         {
             var folder = GetPortFolder();
             Directory.CreateDirectory(folder);
             var data = new PortFileData
             {
                 Port = port,
-                Sln = slnPath ?? ""
+                Sln = slnPath ?? "",
+                Token = token
             };
             File.WriteAllText(GetPortFilePath(pid), JsonConvert.SerializeObject(data));
         }
@@ -201,6 +205,29 @@ namespace VsMcp.Shared
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Returns the auth token of the running VS instance listening on the given port,
+        /// or null if none is found (e.g. an older extension version without auth).
+        /// </summary>
+        public static string FindToken(int port)
+        {
+            foreach (var file in EnumeratePortFiles())
+            {
+                var data = ReadPortFile(file);
+                if (data != null && data.Port == port)
+                    return data.Token;
+            }
+            return null;
+        }
+
+        private static IEnumerable<string> EnumeratePortFiles()
+        {
+            var folder = GetPortFolder();
+            if (!Directory.Exists(folder))
+                return Enumerable.Empty<string>();
+            return Directory.GetFiles(folder, $"{McpConstants.PortFilePrefix}*{McpConstants.PortFileSuffix}");
         }
 
         /// <summary>

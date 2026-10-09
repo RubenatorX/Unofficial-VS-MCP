@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+- **HTTP server now requires a per-session bearer token.** The extension generates a random token at startup and writes it to the port file in `%LOCALAPPDATA%\VsMcp\`. StdioProxy sends it automatically, so existing Claude Code setups keep working. Previously any local process could call every tool without authentication.
+- **Browser requests are rejected by default.** The server no longer sends `Access-Control-Allow-Origin: *`, and requests whose `Origin` header is not in the new `allowedOrigins` setting get `403`. Previously any web page could find the server's port (via `/health`) and call tools such as `file_write` or `execute_command`.
+- **New `server-settings.json`** (`requireAuthToken`, `allowedOrigins`) to allow trusted local web UIs. See the Security section of the README.
+
 ## [0.9.0] - 2026-05-13
 
 ### Improved
